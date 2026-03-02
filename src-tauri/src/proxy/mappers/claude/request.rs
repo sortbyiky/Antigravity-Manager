@@ -1493,14 +1493,15 @@ fn build_google_content(
             })
             .collect();
 
+        // [FIX] 必须在 return 之前 clear，否则提前返回会导致 pending 永远残留
+        pending_tool_use_ids.clear();
+
         if !synthetic_parts.is_empty() {
             return Ok(json!({
                 "role": "user",
                 "parts": synthetic_parts
             }));
         }
-        // Clear pending IDs as we have handled them
-        pending_tool_use_ids.clear();
     }
 
     let parts = build_contents(
@@ -1591,9 +1592,39 @@ fn build_google_contents(
         }
     }
 
-    // [Removed] ensure_last_assistant_has_thinking
-    // Corrupted signature issues proved we cannot fake thinking blocks.
-    // Instead we rely on should_disable_thinking_due_to_history to prevent this state.
+    // [FIX] 最终安全网：循环结束后，如果仍有未匹配的 tool_use（最后一条消息是 Assistant 且含 tool_use），
+    // 必须追加一条合成的 User 消息补全 tool_result，否则 Gemini 会报 400 错误：
+    // "tool_use ids were found without tool_result blocks immediately after"
+    if !pending_tool_use_ids.is_empty() {
+        let final_missing: Vec<serde_json::Value> = pending_tool_use_ids
+            .iter()
+            .filter(|id| !existing_tool_result_ids.contains(*id))
+            .map(|id| {
+                let name = tool_id_to_name.get(id).cloned().unwrap_or(id.clone());
+                json!({
+                    "functionResponse": {
+                        "name": name,
+                        "response": {
+                            "result": "Tool execution interrupted. No result provided."
+                        },
+                        "id": id
+                    }
+                })
+            })
+            .collect();
+
+        if !final_missing.is_empty() {
+            tracing::warn!(
+                "[Elastic-Recovery] Final safety net: injecting {} missing tool results at end of conversation",
+                final_missing.len()
+            );
+            contents.push(json!({
+                "role": "user",
+                "parts": final_missing
+            }));
+        }
+        pending_tool_use_ids.clear();
+    }
 
     // [FIX P3-3] Strict Role Alternation (Message Merging)
     // Merge adjacent messages with the same role to satisfy Gemini's strict alternation rule
