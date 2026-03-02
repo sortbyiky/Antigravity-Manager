@@ -98,15 +98,31 @@ fn remap_function_call_args(tool_name: &str, args: &mut serde_json::Value) {
                 }
             }
             "read" => {
-                // Gemini uses various parameter names instead of "file_path"
-                if !obj.contains_key("file_path") {
-                    let candidates = ["path", "filepath", "filePath", "filename", "file"];
+                // [FIX] Gemini 输出的参数名不确定（path/file_path/filepath 等），
+                // 而客户端期望的参数名也不确定（Cursor 用 path，Claude Code CLI 用 file_path）。
+                // 解决方案：统一提取路径值，同时写入 path 和 file_path 两个字段，兼容所有客户端。
+                let path_value = if obj.contains_key("file_path") {
+                    obj.get("file_path").cloned()
+                } else if obj.contains_key("path") {
+                    obj.get("path").cloned()
+                } else {
+                    let candidates = ["filepath", "filePath", "filename", "file"];
+                    let mut found = None;
                     for candidate in &candidates {
                         if let Some(val) = obj.remove(*candidate) {
-                            obj.insert("file_path".to_string(), val);
-                            tracing::debug!("[Response] Remapped Read: {} → file_path", candidate);
+                            tracing::debug!("[Response] Remapped Read: {} → path/file_path", candidate);
+                            found = Some(val);
                             break;
                         }
+                    }
+                    found
+                };
+                if let Some(val) = path_value {
+                    if !obj.contains_key("path") {
+                        obj.insert("path".to_string(), val.clone());
+                    }
+                    if !obj.contains_key("file_path") {
+                        obj.insert("file_path".to_string(), val);
                     }
                 }
             }
