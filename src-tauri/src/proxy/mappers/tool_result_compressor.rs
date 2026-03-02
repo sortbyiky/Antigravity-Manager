@@ -121,17 +121,17 @@ fn compact_saved_output_notice(text: &str, max_chars: usize) -> Option<String> {
 }
 
 /// 压缩浏览器快照 (头+尾保留策略)
-/// 
-/// 检测: "page snapshot" 或 "页面快照" 或大量 "ref=" 引用
+///
+/// 检测: "page snapshot" 或 "页面快照" 或大量 "[ref=" 引用且含 accessibility tree 特征
 /// 策略: 保留头部 70% + 尾部 30%,中间省略
-/// 
+///
 /// 使用头+尾保留策略压缩较长的页面快照数据
 fn compact_browser_snapshot(text: &str, max_chars: usize) -> Option<String> {
-    // 检测是否是浏览器快照
-    let is_snapshot = text.to_lowercase().contains("page snapshot")
+    let lower = text.to_lowercase();
+    // 检测是否是浏览器快照（精确匹配，避免源代码中的 ref= 误触发）
+    let is_snapshot = lower.contains("page snapshot")
         || text.contains("页面快照")
-        || text.matches("ref=").count() > 30
-        || text.matches("[ref=").count() > 30;
+        || (text.matches("[ref=").count() > 30 && lower.contains("accessibility tree"));
     
     if !is_snapshot {
         return None;

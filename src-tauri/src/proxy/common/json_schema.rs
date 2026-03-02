@@ -332,8 +332,14 @@ fn clean_json_schema_recursive(value: &mut Value, is_schema_node: bool, depth: u
                     }
                     
                     // [NEW] 添加类型提示到描述中 (参考 CLIProxyAPI)
+                    // [FIX] 当包含 null 类型时，明确标注参数可选，防止 Gemini 强制填写
                     if all_types.len() > 1 {
-                        let type_hint = format!("Accepts: {}", all_types.join(" | "));
+                        let has_null = all_types.iter().any(|t| t == "null");
+                        let type_hint = if has_null {
+                            format!("Accepts: {} (Optional - omit if not needed)", all_types.join(" | "))
+                        } else {
+                            format!("Accepts: {}", all_types.join(" | "))
+                        };
                         append_hint_to_description(map, type_hint);
                     }
                 }

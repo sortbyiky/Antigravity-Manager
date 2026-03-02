@@ -117,11 +117,15 @@ pub fn remap_function_call_args(name: &str, args: &mut Value) {
                 }
             }
             "read" => {
-                // Gemini might use "path" vs "file_path"
-                if let Some(path) = obj.remove("path") {
-                    if !obj.contains_key("file_path") {
-                        obj.insert("file_path".to_string(), path);
-                        tracing::debug!("[Streaming] Remapped Read: path → file_path");
+                // Gemini uses various parameter names instead of "file_path"
+                if !obj.contains_key("file_path") {
+                    let candidates = ["path", "filepath", "filePath", "filename", "file"];
+                    for candidate in &candidates {
+                        if let Some(val) = obj.remove(*candidate) {
+                            obj.insert("file_path".to_string(), val);
+                            tracing::debug!("[Streaming] Remapped Read: {} → file_path", candidate);
+                            break;
+                        }
                     }
                 }
             }
