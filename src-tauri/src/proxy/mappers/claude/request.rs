@@ -436,7 +436,7 @@ pub fn transform_claude_request_in(
             } else {
                 "file_path" // 默认
             };
-            super::set_read_path_param(param_name);
+            super::set_read_path_param(_session_id, param_name);
             tracing::debug!("[Request] Detected Read tool path param: {}", param_name);
         }
     }

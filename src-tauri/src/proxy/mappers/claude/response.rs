@@ -7,7 +7,7 @@ use serde_json::json;
 
 /// Known parameter remappings for Gemini → Claude compatibility
 /// [FIX] Gemini sometimes uses different parameter names than specified in tool schema
-fn remap_function_call_args(tool_name: &str, args: &mut serde_json::Value) {
+fn remap_function_call_args(tool_name: &str, args: &mut serde_json::Value, session_id: Option<&str>) {
     // [DEBUG] Always log incoming tool usage for diagnosis
     if let Some(obj) = args.as_object() {
         tracing::debug!("[Response] Tool Call: '{}' Args: {:?}", tool_name, obj);
@@ -101,7 +101,7 @@ fn remap_function_call_args(tool_name: &str, args: &mut serde_json::Value) {
                 // [FIX] 根据客户端 schema 动态决定参数名：
                 // Cursor 用 "path"，Claude Code 用 "file_path"（且设了 additionalProperties:false）
                 // 请求阶段已从工具 schema 提取正确参数名存入 thread_local
-                let target_param = super::get_read_path_param();
+                let target_param = super::get_read_path_param(session_id.unwrap_or(""));
 
                 // 统一提取路径值（无论 Gemini 输出了哪个参数名）
                 let path_value = if let Some(val) = obj.get("file_path").cloned() {
@@ -320,7 +320,7 @@ impl NonStreamingProcessor {
 
             // [FIX] Remap args for Gemini → Claude compatibility
             let mut args = fc.args.clone().unwrap_or(serde_json::json!({}));
-            remap_function_call_args(&tool_name, &mut args);
+            remap_function_call_args(&tool_name, &mut args, self.session_id.as_deref());
 
             let mut tool_use = ContentBlock::ToolUse {
                 id: tool_id,

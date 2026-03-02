@@ -9,25 +9,55 @@ pub mod utils;
 pub mod thinking_utils;
 pub mod collector;
 
-use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
-// [FIX] 跨请求-响应传递 Read 工具的路径参数名
+// [FIX] 跨请求-响应传递 Read 工具的路径参数名（按 session_id 隔离）
 // 请求阶段从客户端工具 schema 中提取 Read 工具的 required 参数名（"path" 或 "file_path"），
 // 响应阶段据此决定只保留哪个字段，避免多余字段触发 additionalProperties 校验失败。
-thread_local! {
-    static READ_PATH_PARAM_NAME: RefCell<String> = RefCell::new("file_path".to_string());
+//
+// 使用全局 Mutex<HashMap> 而非 thread_local，因为 Tokio 异步运行时中
+// 请求和响应可能在不同线程上执行，thread_local 会导致跨线程读取到错误的默认值。
+struct ReadParamCache {
+    /// session_id -> 参数名 ("path" 或 "file_path")
+    entries: Mutex<HashMap<String, String>>,
+}
+
+impl ReadParamCache {
+    fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn global() -> &'static ReadParamCache {
+        static INSTANCE: OnceLock<ReadParamCache> = OnceLock::new();
+        INSTANCE.get_or_init(ReadParamCache::new)
+    }
 }
 
 /// 设置 Read 工具使用的路径参数名（请求阶段调用）
-pub fn set_read_path_param(name: &str) {
-    READ_PATH_PARAM_NAME.with(|cell| {
-        *cell.borrow_mut() = name.to_string();
-    });
+pub fn set_read_path_param(session_id: &str, name: &str) {
+    if let Ok(mut cache) = ReadParamCache::global().entries.lock() {
+        cache.insert(session_id.to_string(), name.to_string());
+        // 限制缓存大小，防止内存泄漏
+        if cache.len() > 1000 {
+            let keys: Vec<String> = cache.keys().take(500).cloned().collect();
+            for k in keys {
+                cache.remove(&k);
+            }
+        }
+    }
 }
 
 /// 获取 Read 工具使用的路径参数名（响应阶段调用）
-pub fn get_read_path_param() -> String {
-    READ_PATH_PARAM_NAME.with(|cell| cell.borrow().clone())
+pub fn get_read_path_param(session_id: &str) -> String {
+    ReadParamCache::global()
+        .entries
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(session_id).cloned())
+        .unwrap_or_else(|| "file_path".to_string()) // 默认 file_path（兼容 Claude Code）
 }
 
 pub use models::*;
