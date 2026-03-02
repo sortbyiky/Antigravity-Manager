@@ -423,6 +423,24 @@ pub fn transform_claude_request_in(
         }
     }
 
+    // [FIX] 从 Read 工具 schema 中提取路径参数名，传递给响应阶段
+    // Cursor 用 "path"，Claude Code 用 "file_path"
+    if let Some(read_schema) = tool_name_to_schema.get("Read")
+        .or_else(|| tool_name_to_schema.get("read"))
+    {
+        if let Some(props) = read_schema.get("properties").and_then(|p| p.as_object()) {
+            let param_name = if props.contains_key("file_path") {
+                "file_path"
+            } else if props.contains_key("path") {
+                "path"
+            } else {
+                "file_path" // 默认
+            };
+            super::set_read_path_param(param_name);
+            tracing::debug!("[Request] Detected Read tool path param: {}", param_name);
+        }
+    }
+
     // 1. System Instruction (注入动态身份防护 & MCP XML 协议)
     let system_instruction =
         build_system_instruction(&claude_req.system, &claude_req.model, has_mcp_tools);

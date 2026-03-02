@@ -9,6 +9,27 @@ pub mod utils;
 pub mod thinking_utils;
 pub mod collector;
 
+use std::cell::RefCell;
+
+// [FIX] 跨请求-响应传递 Read 工具的路径参数名
+// 请求阶段从客户端工具 schema 中提取 Read 工具的 required 参数名（"path" 或 "file_path"），
+// 响应阶段据此决定只保留哪个字段，避免多余字段触发 additionalProperties 校验失败。
+thread_local! {
+    static READ_PATH_PARAM_NAME: RefCell<String> = RefCell::new("file_path".to_string());
+}
+
+/// 设置 Read 工具使用的路径参数名（请求阶段调用）
+pub fn set_read_path_param(name: &str) {
+    READ_PATH_PARAM_NAME.with(|cell| {
+        *cell.borrow_mut() = name.to_string();
+    });
+}
+
+/// 获取 Read 工具使用的路径参数名（响应阶段调用）
+pub fn get_read_path_param() -> String {
+    READ_PATH_PARAM_NAME.with(|cell| cell.borrow().clone())
+}
+
 pub use models::*;
 pub use request::{transform_claude_request_in, clean_cache_control_from_messages, merge_consecutive_messages};
 pub use response::transform_response;

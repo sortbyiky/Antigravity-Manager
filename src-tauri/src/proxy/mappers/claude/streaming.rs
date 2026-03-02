@@ -117,32 +117,36 @@ pub fn remap_function_call_args(name: &str, args: &mut Value) {
                 }
             }
             "read" => {
-                // [FIX] Gemini 输出的参数名不确定（path/file_path/filepath 等），
-                // 而客户端期望的参数名也不确定（Cursor 用 path，Claude Code CLI 用 file_path）。
-                // 解决方案：统一提取路径值，同时写入 path 和 file_path 两个字段，兼容所有客户端。
-                let path_value = if obj.contains_key("file_path") {
-                    obj.get("file_path").cloned()
-                } else if obj.contains_key("path") {
-                    obj.get("path").cloned()
+                // [FIX] 根据客户端 schema 动态决定参数名：
+                // Cursor 用 "path"，Claude Code 用 "file_path"（且设了 additionalProperties:false）
+                // 请求阶段已从工具 schema 提取正确参数名存入 thread_local
+                let target_param = super::get_read_path_param();
+
+                // 统一提取路径值（无论 Gemini 输出了哪个参数名）
+                let path_value = if let Some(val) = obj.get("file_path").cloned() {
+                    Some(val)
+                } else if let Some(val) = obj.get("path").cloned() {
+                    Some(val)
                 } else {
                     let candidates = ["filepath", "filePath", "filename", "file"];
                     let mut found = None;
                     for candidate in &candidates {
                         if let Some(val) = obj.remove(*candidate) {
-                            tracing::debug!("[Streaming] Remapped Read: {} → path/file_path", candidate);
+                            tracing::debug!("[Streaming] Remapped Read: {} → {}", candidate, target_param);
                             found = Some(val);
                             break;
                         }
                     }
                     found
                 };
+
                 if let Some(val) = path_value {
-                    if !obj.contains_key("path") {
-                        obj.insert("path".to_string(), val.clone());
-                    }
-                    if !obj.contains_key("file_path") {
-                        obj.insert("file_path".to_string(), val);
-                    }
+                    // 移除所有可能的路径参数名
+                    obj.remove("file_path");
+                    obj.remove("path");
+                    // 只写入客户端期望的那个
+                    obj.insert(target_param.clone(), val);
+                    tracing::debug!("[Streaming] Read tool: using param name '{}'", target_param);
                 }
             }
             "ls" => {
