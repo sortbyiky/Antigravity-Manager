@@ -1276,13 +1276,10 @@ fn build_contents(
 
                         // [FIX #593] 工具输出压缩: 处理超大工具输出
                         // 使用智能压缩策略(浏览器快照、大文件提示等)
-                        // [FIX] read 工具返回的文件内容不应被浏览器快照/HTML清洗压缩，避免内容篡改
+                        // 所有工具（包括 read）统一压缩，避免上下文超过 200k token 限制
                         let mut compacted_content = content.clone();
-                        let skip_compress = matches!(func_name.to_lowercase().as_str(), "read");
-                        if !skip_compress {
-                            if let Some(blocks) = compacted_content.as_array_mut() {
-                                tool_result_compressor::sanitize_tool_result_blocks(blocks);
-                            }
+                        if let Some(blocks) = compacted_content.as_array_mut() {
+                            tool_result_compressor::sanitize_tool_result_blocks(blocks);
                         }
 
                         // Smart Truncation: No longer stripping images from Tool Results
