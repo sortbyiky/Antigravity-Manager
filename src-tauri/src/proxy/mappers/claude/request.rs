@@ -1465,33 +1465,27 @@ fn build_contents(
                             }
                         }
 
-                        // Smart Truncation: No longer stripping images from Tool Results
-                        // Tool results should pass transparency. If images are present, map them to inlineData.
-                        let mut extra_parts = Vec::new();
+                        // [FIX] 图片不再从 tool_result 拆出为独立 inlineData part
+                        // 原因: Gemini 格式下，独立的 inlineData part 会打断 functionResponse 序列，
+                        // 导致 Vertex AI 转回 Claude 格式时 tool_use/tool_result 配对断裂 (400 错误)
+                        // 图片通常在 user 消息中已存在 (由 Read 工具返回)，tool_result 里的是冗余副本
 
                         let mut merged_content = match &compacted_content {
                             serde_json::Value::String(s) => s.clone(),
                             serde_json::Value::Array(arr) => {
                                 let mut texts = Vec::new();
+                                let mut image_count = 0u32;
                                 for block in arr {
                                     if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                                         texts.push(text.to_string());
                                     } else if block.get("source").is_some() {
                                         if block.get("type").and_then(|v| v.as_str()) == Some("image") {
-                                            let source = block.get("source").unwrap();
-                                            if let (Some(media_type), Some(data)) = (
-                                                source.get("media_type").and_then(|v| v.as_str()),
-                                                source.get("data").and_then(|v| v.as_str())
-                                            ) {
-                                                extra_parts.push(json!({
-                                                    "inlineData": {
-                                                        "mimeType": media_type,
-                                                        "data": data
-                                                    }
-                                                }));
-                                            }
+                                            image_count += 1;
                                         }
                                     }
+                                }
+                                if image_count > 0 {
+                                    texts.push(format!("[{} image(s) returned by tool, already visible in conversation]", image_count));
                                 }
                                 texts.join("\n")
                             }
@@ -1538,11 +1532,6 @@ fn build_contents(
                         }
 
                         parts.push(part);
-
-                        // 追加图片 parts
-                        for extra in extra_parts {
-                            parts.push(extra);
-                        }
 
                         // 标记状态，用于下一条 User 消息的去重判断
                         *previous_was_tool_result = true;
