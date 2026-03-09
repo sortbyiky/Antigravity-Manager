@@ -1089,6 +1089,8 @@ fn build_contents(
     let mut parts = Vec::new();
     // Track tool results in the current turn to identify missing ones
     let mut current_turn_tool_result_ids = std::collections::HashSet::new();
+    // [FIX] 延迟追加的图片 parts，防止 inlineData 插在多个 functionResponse 之间导致配对断裂
+    let mut deferred_image_parts: Vec<Value> = Vec::new();
 
     // Track if we have already seen non-thinking content in this message.
     // Anthropic/Gemini protocol: Thinking blocks MUST come first.
@@ -1465,27 +1467,32 @@ fn build_contents(
                             }
                         }
 
-                        // [FIX] 图片不再从 tool_result 拆出为独立 inlineData part
-                        // 原因: Gemini 格式下，独立的 inlineData part 会打断 functionResponse 序列，
-                        // 导致 Vertex AI 转回 Claude 格式时 tool_use/tool_result 配对断裂 (400 错误)
-                        // 图片通常在 user 消息中已存在 (由 Read 工具返回)，tool_result 里的是冗余副本
+                        // [FIX] 图片从 tool_result 中提取，延迟到所有 functionResponse 处理完后再追加
+                        // 防止 inlineData 插在 functionResponse 之间导致 Vertex AI 配对断裂
 
                         let mut merged_content = match &compacted_content {
                             serde_json::Value::String(s) => s.clone(),
                             serde_json::Value::Array(arr) => {
                                 let mut texts = Vec::new();
-                                let mut image_count = 0u32;
                                 for block in arr {
                                     if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                                         texts.push(text.to_string());
                                     } else if block.get("source").is_some() {
                                         if block.get("type").and_then(|v| v.as_str()) == Some("image") {
-                                            image_count += 1;
+                                            let source = block.get("source").unwrap();
+                                            if let (Some(media_type), Some(data)) = (
+                                                source.get("media_type").and_then(|v| v.as_str()),
+                                                source.get("data").and_then(|v| v.as_str())
+                                            ) {
+                                                deferred_image_parts.push(json!({
+                                                    "inlineData": {
+                                                        "mimeType": media_type,
+                                                        "data": data
+                                                    }
+                                                }));
+                                            }
                                         }
                                     }
-                                }
-                                if image_count > 0 {
-                                    texts.push(format!("[{} image(s) returned by tool, already visible in conversation]", image_count));
                                 }
                                 texts.join("\n")
                             }
@@ -1575,6 +1582,16 @@ fn build_contents(
         }
         // All pending IDs are now handled (either present or injected)
         pending_tool_use_ids.clear();
+    }
+
+    // [FIX] 所有 functionResponse 处理完后，统一追加延迟的图片 parts
+    // 这样 inlineData 不会插在 functionResponse 之间，避免 Vertex AI 配对断裂
+    if !deferred_image_parts.is_empty() {
+        tracing::debug!(
+            "[ToolResult-Image] Appending {} deferred image part(s) after all functionResponse parts",
+            deferred_image_parts.len()
+        );
+        parts.extend(deferred_image_parts);
     }
 
     // Fix for "Thinking enabled, assistant message must start with thinking block" 400 error
