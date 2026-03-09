@@ -61,7 +61,7 @@ pub fn get_read_path_param(session_id: &str) -> String {
 }
 
 pub use models::*;
-pub use request::{transform_claude_request_in, clean_cache_control_from_messages, merge_consecutive_messages};
+pub use request::{transform_claude_request_in, clean_cache_control_from_messages, merge_consecutive_messages, repair_tool_use_result_pairing};
 pub use response::transform_response;
 pub use streaming::{PartProcessor, StreamingState};
 pub use thinking_utils::{close_tool_loop_for_thinking, filter_invalid_thinking_blocks_with_family};

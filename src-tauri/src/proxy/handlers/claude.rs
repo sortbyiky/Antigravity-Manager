@@ -15,7 +15,7 @@ use tracing::{debug, error, info};
 use crate::proxy::mappers::claude::{
     transform_claude_request_in, transform_response, create_claude_sse_stream, ClaudeRequest,
     filter_invalid_thinking_blocks_with_family, close_tool_loop_for_thinking,
-    clean_cache_control_from_messages, merge_consecutive_messages,
+    clean_cache_control_from_messages, merge_consecutive_messages, repair_tool_use_result_pairing,
     models::{Message, MessageContent},
 };
 use crate::proxy::server::AppState;

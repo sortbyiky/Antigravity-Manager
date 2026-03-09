@@ -251,6 +251,156 @@ fn sort_thinking_blocks_first(messages: &mut [Message]) {
     }
 }
 
+/// [FIX] 修复 tool_use / tool_result 配对关系 (Claude 协议级)
+///
+/// 扫描消息历史，确保每个 assistant 消息中的 tool_use block
+/// 都有对应的 tool_result block 在紧随其后的 user 消息中。
+/// 缺失时注入合成的 tool_result block，防止上游 Anthropic API 返回 400:
+/// "tool_use ids were found without tool_result blocks immediately after"
+///
+/// 触发场景:
+/// - 上下文裁剪 (trim_tool_messages) 删除了 tool_result 但保留了 tool_use
+/// - 消息合并 (merge_consecutive_messages) 打乱了配对顺序
+/// - 客户端发送了不完整的消息历史 (例如读图片中断)
+pub fn repair_tool_use_result_pairing(messages: &mut Vec<Message>) {
+    if messages.len() < 2 {
+        return;
+    }
+
+    // Phase 1: 收集所有已存在的 tool_result ID，防止重复注入
+    let mut existing_result_ids = std::collections::HashSet::new();
+    for msg in messages.iter() {
+        if let MessageContent::Array(blocks) = &msg.content {
+            for block in blocks {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    existing_result_ids.insert(tool_use_id.clone());
+                }
+            }
+        }
+    }
+
+    // Phase 2: 顺序遍历消息，修复配对缺失
+    let mut repaired: Vec<Message> = Vec::with_capacity(messages.len() + 4);
+    // (tool_use_id, tool_name)
+    let mut pending_tool_uses: Vec<(String, String)> = Vec::new();
+
+    for msg in messages.drain(..) {
+        if msg.role == "assistant" {
+            // 如果上一个 assistant 消息的 tool_use 还没有被 user 消息消费，
+            // 说明出现了连续 assistant 消息，需要在中间插入合成的 user 消息
+            if !pending_tool_uses.is_empty() {
+                let synthetic_blocks: Vec<ContentBlock> = pending_tool_uses
+                    .drain(..)
+                    .filter(|(id, _)| !existing_result_ids.contains(id))
+                    .map(|(id, _name)| ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        content: serde_json::json!("Tool execution was interrupted. No result available."),
+                        is_error: Some(true),
+                    })
+                    .collect();
+
+                if !synthetic_blocks.is_empty() {
+                    tracing::warn!(
+                        "[ToolPairRepair] Injecting synthetic user message with {} tool_result(s) between consecutive assistant messages",
+                        synthetic_blocks.len()
+                    );
+                    repaired.push(Message {
+                        role: "user".to_string(),
+                        content: MessageContent::Array(synthetic_blocks),
+                    });
+                }
+            }
+
+            // 收集当前 assistant 消息中的 tool_use ID
+            if let MessageContent::Array(blocks) = &msg.content {
+                for block in blocks {
+                    if let ContentBlock::ToolUse { id, name, .. } = block {
+                        pending_tool_uses.push((id.clone(), name.clone()));
+                    }
+                }
+            }
+
+            repaired.push(msg);
+        } else {
+            // User 消息: 检查是否已包含对应的 tool_result
+            if !pending_tool_uses.is_empty() {
+                let mut found_ids = std::collections::HashSet::new();
+                if let MessageContent::Array(blocks) = &msg.content {
+                    for block in blocks {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                            found_ids.insert(tool_use_id.clone());
+                        }
+                    }
+                }
+
+                // 筛出缺失的 tool_result
+                let missing: Vec<(String, String)> = pending_tool_uses
+                    .drain(..)
+                    .filter(|(id, _)| !found_ids.contains(id) && !existing_result_ids.contains(id))
+                    .collect();
+
+                if !missing.is_empty() {
+                    tracing::warn!(
+                        "[ToolPairRepair] Injecting {} missing tool_result(s) into user message (IDs: {:?})",
+                        missing.len(),
+                        missing.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>()
+                    );
+
+                    // 将原消息拆为 blocks，前置缺失的 tool_result
+                    let original_blocks = match msg.content {
+                        MessageContent::Array(blocks) => blocks,
+                        MessageContent::String(text) => vec![ContentBlock::Text { text }],
+                    };
+
+                    let mut new_blocks: Vec<ContentBlock> = missing
+                        .into_iter()
+                        .map(|(id, _name)| ContentBlock::ToolResult {
+                            tool_use_id: id,
+                            content: serde_json::json!("Tool execution was interrupted. No result available."),
+                            is_error: Some(true),
+                        })
+                        .collect();
+                    new_blocks.extend(original_blocks);
+
+                    repaired.push(Message {
+                        role: "user".to_string(),
+                        content: MessageContent::Array(new_blocks),
+                    });
+                    continue;
+                }
+            }
+            pending_tool_uses.clear();
+            repaired.push(msg);
+        }
+    }
+
+    // 最终安全网: 如果最后一条消息是 assistant 且有未匹配的 tool_use，追加合成 user 消息
+    if !pending_tool_uses.is_empty() {
+        let synthetic_blocks: Vec<ContentBlock> = pending_tool_uses
+            .drain(..)
+            .filter(|(id, _)| !existing_result_ids.contains(id))
+            .map(|(id, _name)| ContentBlock::ToolResult {
+                tool_use_id: id,
+                content: serde_json::json!("Tool execution was interrupted. No result available."),
+                is_error: Some(true),
+            })
+            .collect();
+
+        if !synthetic_blocks.is_empty() {
+            tracing::warn!(
+                "[ToolPairRepair] Injecting final synthetic user message with {} tool_result(s) for trailing tool_use(s)",
+                synthetic_blocks.len()
+            );
+            repaired.push(Message {
+                role: "user".to_string(),
+                content: MessageContent::Array(synthetic_blocks),
+            });
+        }
+    }
+
+    *messages = repaired;
+}
+
 /// 合并 ClaudeRequest 中连续的同角色消息
 ///
 /// 场景: 当从 Spec/Plan 模式切换回编码模式时，可能出现连续两条 "user" 消息
@@ -350,6 +500,11 @@ pub fn transform_claude_request_in(
     // [FIX #813] 合并连续的同角色消息 (Consecutive User Messages)
     // 确保请求符合 Anthropic 和 Gemini 的角色交替协议
     merge_consecutive_messages(&mut cleaned_req.messages);
+
+    // [FIX] 修复 tool_use/tool_result 配对关系 (Claude 协议级)
+    // 必须在 merge 之后、格式转换之前执行，防止上游 Anthropic API 返回 400:
+    // "tool_use ids were found without tool_result blocks immediately after"
+    repair_tool_use_result_pairing(&mut cleaned_req.messages);
 
     clean_cache_control_from_messages(&mut cleaned_req.messages);
 
